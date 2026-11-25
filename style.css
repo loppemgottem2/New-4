@@ -27,13 +27,13 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 
 header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -.01em; }
-.brand img { width: 26px; height: 26px; }
+.brand img { width: 32px; height: 32px; }
 .icon-btn { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; }
 .icon-btn:active { background: var(--soft); }
 
 #chat { overflow-y: auto; padding: 8px 16px 12px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 #empty { margin: auto; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 14px; }
-#empty img { width: 64px; height: 64px; }
+#empty img { width: 88px; height: 88px; }
 #empty h1 { font-size: 22px; font-weight: 600; letter-spacing: -.02em; }
 .suggest { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .suggest button { border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; font-size: 14px; }
