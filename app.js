@@ -164,7 +164,9 @@ function md(src) {
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\[(\d+)\]/g, '<sup>[$1]</sup>')
-    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[^"'>=\w])((?:https?:\/\/|www\.)[^\s<]*[^\s<.,;:!?)\]'"*])/g,
+      (_, pre, url) => `${pre}<a href="${url.startsWith('www.') ? 'https://' + url : url}" target="_blank" rel="noopener">${url}</a>`);
   html = html.split(/\n{2,}/).map(p => {
     if (/^\s*([-*]|\d+\.) /m.test(p) && p.split('\n').every(l => /^\s*([-*]|\d+\.) /.test(l) || !l.trim())) {
       const tag = /^\s*\d+\./.test(p) ? 'ol' : 'ul';

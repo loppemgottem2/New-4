@@ -9,6 +9,4 @@
   <!-- nose + mouth -->
   <path fill="#000" d="M226 300h60l-30 30z"/>
   <path fill="none" stroke="#000" stroke-width="10" stroke-linecap="round" d="M256 330v22M256 352c-10 12-26 14-38 6M256 352c10 12 26 14 38 6"/>
-  <!-- brow line -->
-  <path fill="none" stroke="#000" stroke-width="8" stroke-linecap="round" d="M256 160v52"/>
 </svg>
