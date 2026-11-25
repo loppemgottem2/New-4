@@ -20,7 +20,9 @@ const state = {
   active: new Set(),                    // model ids generating right now
   open: null,                           // model id expanded in the Models tab
   health: store.get('health', {}),      // id -> { ok, ms, err, t } from tests and real use
-  testing: null                         // { done, total } while "Test all models" runs
+  testing: null,                        // { done, total } while "Test all models" runs
+  testingIds: new Set(),
+  testNote: ''
 };
 const HEALTH_TTL = 6 * 3600e3;          // trust a test result for 6 hours
 function health(id) { const h = state.health[id]; return h && Date.now() - h.t < HEALTH_TTL ? h : null; }
@@ -426,9 +428,12 @@ function modelRow(m, role) {
     .filter(Boolean).map(b => `<span class="tag">${b}</span>`).join('');
   const h = health(m.id);
   const status = live ? '<span class="st live">In use</span>' : pinned ? '<span class="st on">Pinned</span>' : role ? `<span class="st">${esc(role)}</span>` : '';
-  const dot = h ? `<span class="dot ${h.ok ? 'ok' : 'bad'}" title="${h.ok ? 'Works' : 'Not working'}"></span>` : '';
+  const testing = state.testingIds.has(m.id);
+  const kind = testing ? 'testing' : h ? (h.ok ? 'ok' : 'bad') : 'none';
+  const dot = `<span class="dot ${kind}"></span>`;
+  const statusText = testing ? 'testing…' : h ? (h.ok ? 'works' + (h.ms ? ' · ' + (h.ms / 1000).toFixed(1) + 's' : '') : 'not working') : 'not tested yet';
   return `<div class="mrow${open ? ' open' : ''}${live ? ' is-live' : ''}" data-id="${esc(m.id)}">
-    <button class="mtop">${logo(m.id)}<span class="mname"><b>${dot}${esc(nice(m))}</b><small>${esc(company(m.id))}${h ? (h.ok ? ' · works' + (h.ms ? ' · ' + (h.ms / 1000).toFixed(1) + 's' : '') : ' · not working') : ''}</small></span>${status}</button>
+    <button class="mtop">${logo(m.id)}<span class="mname"><b>${dot}${esc(nice(m))}</b><small>${esc(company(m.id))} · ${statusText}</small></span>${status}</button>
     <div class="mmore">
       <div class="tags">${badges}</div>
       ${h && !h.ok ? `<p class="err">${esc(h.err || 'Failed last test.')}</p>` : ''}
@@ -472,7 +477,9 @@ function refreshModels() {
   const hasDeepSeek = state.models.some(m => /deepseek/i.test(m.id));
   $('#mTools').innerHTML = `
     <button class="primary" id="testAll" ${state.testing ? 'disabled' : ''}>${state.testing ? `Testing ${state.testing.done} of ${state.testing.total}…` : 'Test all models'}</button>
-    <p class="hint">${hs.length ? `<b>${okN} working</b> · ${badN} not working. Lion AI skips broken models automatically.` : 'Checks every model with your key, so Lion AI only uses ones that work.'}</p>
+    <p class="hint"><b>${okN} working</b> · ${badN} not working · ${state.models.length - hs.length} not tested yet. Lion AI skips broken models automatically.</p>
+    ${state.testNote ? `<p class="hint err">${esc(state.testNote)}</p>` : ''}
+    <p class="hint">Each test uses one free message (free accounts get about 50 a day). Keep the app open until it finishes.</p>
     ${hasDeepSeek ? '' : '<p class="hint">No free DeepSeek model is offered right now. OpenRouter changes its free list often; reload models in Settings later to check again.</p>'}`;
 
   const q = $('#mSearch').value.trim().toLowerCase();
@@ -485,26 +492,52 @@ function refreshModels() {
     || '<p class="hint">No models match.</p>';
 }
 
+// Returns 'ok', 'bad', 'retry' (per-minute limit) or 'daily' (daily free limit used up).
 async function testModel(m) {
-  const t0 = performance.now(), ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 30000);
+  const t0 = performance.now(), ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 25000);
   try {
     const r = await fetch(baseUrl() + '/chat/completions', { method: 'POST', headers: headers(), signal: ctrl.signal,
       body: JSON.stringify({ model: m.id, messages: [{ role: 'user', content: 'Reply with the word OK.' }], max_tokens: 16 }) });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || j.error) throw new Error(j.error?.metadata?.raw || j.error?.message || 'HTTP ' + r.status);
+    if (!r.ok || j.error) {
+      const msg = j.error?.metadata?.raw || j.error?.message || 'HTTP ' + r.status;
+      if (r.status === 429 || j.error?.code === 429) return /per.?day|daily|free-models-per-day/i.test(msg) ? 'daily' : 'retry';
+      if (r.status === 401) return 'auth';
+      throw new Error(msg);
+    }
     setHealth(m.id, true, { ms: Math.round(performance.now() - t0) });
+    return 'ok';
   } catch (e) {
-    setHealth(m.id, false, { err: e.name === 'AbortError' ? 'Did not answer within 30 seconds.' : friendly(e.message) });
+    setHealth(m.id, false, { err: e.name === 'AbortError' ? 'Did not answer within 25 seconds.' : friendly(e.message) });
+    return 'bad';
   } finally { clearTimeout(timer); }
 }
 
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
 async function testAll() {
   if (state.testing) return;
-  const list = [...state.models];
-  state.testing = { done: 0, total: list.length }; refreshModels();
-  // Two at a time keeps us under OpenRouter's free per-minute limit.
-  const next = async () => { for (let m; (m = list.shift());) { await testModel(m); state.testing.done++; refreshModels(); } };
-  await Promise.all([next(), next()]);
+  // Test untested models first, then the oldest results.
+  const list = [...state.models].sort((a, b) => (health(a.id)?.t || 0) - (health(b.id)?.t || 0));
+  state.testing = { done: 0, total: list.length }; state.testNote = ''; refreshModels();
+  let stop = false;
+  const worker = async () => {
+    for (let m; !stop && (m = list.shift());) {
+      state.testingIds.add(m.id); refreshModels();
+      let res = await testModel(m);
+      for (let tries = 0; res === 'retry' && tries < 3 && !stop; tries++) {
+        state.testNote = 'Free per-minute limit reached, waiting 20 seconds…'; refreshModels();
+        await wait(20000); state.testNote = '';
+        res = await testModel(m);
+      }
+      state.testingIds.delete(m.id);
+      if (res === 'daily') { stop = true; state.testNote = 'Your free daily message limit is used up, so the rest stay untested. It resets daily, or add credits on OpenRouter for a higher limit.'; }
+      else if (res === 'auth') { stop = true; state.testNote = 'Your API key was rejected. Check it in Settings.'; }
+      else state.testing.done++;
+      refreshModels();
+    }
+  };
+  await Promise.all([worker(), worker()]);
   state.testing = null; refreshModels();
 }
 
