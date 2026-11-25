@@ -167,3 +167,7 @@ footer { min-width: 0; padding: 6px 12px 10px; display: flex; flex-direction: co
 .dot.none { background: transparent; box-shadow: inset 0 0 0 1.5px #bdbdbd; }
 .dot.testing { background: #bdbdbd; animation: pulse 1s ease-in-out infinite; }
 #mTools .err { color: #b00020; }
+.logo { position: relative; overflow: hidden; }
+.logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 5px; background: #fff; border: 1px solid var(--line); border-radius: 10px; }
+.verified { font-size: 13px; font-weight: 600; color: #1a7f37; }
+.checks .card { max-height: 28vh; font-size: 13px; }

@@ -7,6 +7,7 @@ A minimalist, mobile-first AI chat app (installable PWA) that runs on free open 
 - **Thinking levels**: Low / Med / High change the model choice, the reasoning effort sent to reasoning models, and the answer style. Model reasoning is shown in a collapsible block.
 - **Compare**: three different models answer side by side (swipe between them).
 - **Council**: three models answer, then a reasoning model compares them, fixes errors and writes one final verdict.
+- **Verify**: after the answer, two models from other companies double-check it. If they find problems, the answer is rewritten with the fixes; if not, it is marked Verified. Works with Auto and Council (Council + Verify uses up to 6 models on one prompt).
 - **Research**: pulls Wikipedia sources and has the model cite them as [n].
 - **Models tab**: tap the title to see which models your prompt will use and how they work together (answer, backups, council members, judge), live status while they run, and every available model grouped by company with its abilities and context size. Tap a model to pin it so Auto always uses it. The current model is always shown under the title.
 - Streaming answers, Markdown and code rendering, stop button, chat memory on device.

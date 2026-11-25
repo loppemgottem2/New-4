@@ -22,6 +22,7 @@ const state = {
   health: store.get('health', {}),      // id -> { ok, ms, err, t } from tests and real use
   testing: null,                        // { done, total } while "Test all models" runs
   testingIds: new Set(),
+  verify: store.get('verify', false),
   testNote: ''
 };
 const HEALTH_TTL = 6 * 3600e3;          // trust a test result for 6 hours
@@ -256,12 +257,48 @@ function plan(prompt) {
   let ranked = rankModels(task, state.effort);
   const pinned = state.models.find(m => m.id === state.pinned);
   if (pinned) ranked = [pinned, ...ranked.filter(m => m !== pinned)];
-  if (state.mode === 'auto') return { task, answer: ranked.slice(0, 5), judge: null };
-  return {
-    task,
-    answer: pickDiverse(ranked, 3),
-    judge: state.mode === 'council' ? (rankModels(task, state.effort).find(m => m.reasoning) || ranked[0]) : null
-  };
+  const answer = state.mode === 'auto' ? ranked.slice(0, 5) : pickDiverse(ranked, 3);
+  const judge = state.mode === 'council' ? (rankModels(task, state.effort).find(m => m.reasoning) || ranked[0]) : null;
+  // Checkers: other companies' models that double-check the final answer.
+  const writer = judge || answer[0];
+  const checkers = state.verify && state.mode !== 'compare'
+    ? pickDiverse(ranked.filter(m => m !== writer && m.id.split('/')[0] !== writer?.id.split('/')[0]), 3) : [];
+  return { task, answer, judge, checkers };
+}
+
+const REVIEW_SYS = 'You are a strict expert reviewer. Check the answer below for factual errors, wrong code or math, missing important parts, and misleading advice. ' +
+  'If it is correct and complete, reply with exactly: APPROVED. Otherwise reply "ISSUES:" followed by a short list of concrete problems and how to fix each. Do not rewrite the whole answer.';
+
+async function verify(prompt, final, writer, checkers, sys, sources, signal) {
+  const pool = checkers.filter(m => m.id !== writer.id).slice(0, 2);
+  if (!pool.length) return final;
+  const head = document.createElement('div'); head.className = 'note'; head.textContent = 'Double-checking with ' + pool.map(nice).join(' and ') + '…';
+  const wrap = document.createElement('div'); wrap.className = 'cards checks';
+  chatEl.append(head, wrap); scroll(true);
+  const reviews = (await Promise.all(pool.map(async m => {
+    const card = document.createElement('div'); card.className = 'card'; wrap.append(card);
+    const box = aiBox(card, ['checker', nice(m)]);
+    try {
+      const t = await chat(m, [{ role: 'system', content: REVIEW_SYS }, { role: 'user', content: `Question:\n${prompt}\n\nAnswer to check:\n${final}` }], box.update, signal);
+      box.done(); return { m, t };
+    } catch (e) { box.fail(e); return null; }
+  }))).filter(Boolean);
+  if (!reviews.length) { head.textContent = 'Could not double-check: the checker models are unavailable right now.'; return final; }
+  const issues = reviews.filter(r => !/^\W*APPROVED\W*$/i.test(r.t.trim()) && !/^\W*APPROVED\b/i.test(r.t.trim()));
+  if (!issues.length) {
+    head.className = 'verified'; head.textContent = '✓ Verified by ' + reviews.map(r => nice(r.m)).join(' and ');
+    return final;
+  }
+  head.textContent = `${issues.length} of ${reviews.length} checkers found problems. Fixing them…`;
+  const box = aiBox(chatEl, ['corrected answer', nice(writer)]); box.el.classList.add('verdict');
+  try {
+    const fixed = await chat(writer, [
+      { role: 'system', content: sys + '\nOther AI models reviewed your answer. Fix every valid problem they found, ignore criticism that is wrong, and write the complete corrected answer. Start with one short italic line saying what was fixed.' },
+      { role: 'user', content: `Question: ${prompt}\n\nYour answer:\n${final}\n\nReviews:\n${issues.map(r => `- ${nice(r.m)}: ${r.t}`).join('\n')}` }
+    ], box.update, signal);
+    box.done(sources); head.textContent = 'Checked by ' + reviews.map(r => nice(r.m)).join(' and ') + ', problems fixed below.';
+    return fixed || final;
+  } catch (e) { box.fail(e); return final; }
 }
 
 /* ---------- main flow ---------- */
@@ -271,7 +308,8 @@ async function send(prompt) {
   const ctrl = new AbortController(); state.busy = ctrl; setBusy(true);
   closeModels();
   state.prompt = prompt;
-  const { task, answer, judge } = plan(prompt);
+  const { task, answer, judge, checkers } = plan(prompt);
+  let writer = null;
 
   let sources = [];
   let sys = 'You are Lion AI, a sharp, honest assistant. Use Markdown. ' + EFFORT_SYS[state.effort];
@@ -288,7 +326,7 @@ async function send(prompt) {
       // Try the best match; fall back down the ranking if a free model is busy.
       for (const model of answer) {
         const box = aiBox(chatEl, [short(model.id), task, state.effort]);
-        try { final = await chat(model, messages, box.update, ctrl.signal); box.done(sources); break; }
+        try { final = await chat(model, messages, box.update, ctrl.signal); box.done(sources); writer = model; break; }
         catch (e) {
           if (e.name === 'AbortError' || model === answer[answer.length - 1]) { box.fail(e); break; }
           box.el.className = 'note'; box.el.textContent = `${nice(model)} was unavailable, switching to the next model…`;
@@ -313,11 +351,12 @@ async function send(prompt) {
           { role: 'system', content: sys + '\nYou chair a council of AI models. Compare their answers, keep what is correct, fix errors, resolve disagreements, and write the single best final answer. Briefly note where they disagreed.' },
           { role: 'user', content: `Question: ${prompt}\n\n${brief}` }
         ], box.update, ctrl.signal);
-        box.done(sources);
+        box.done(sources); writer = judge;
       } else {
         final = ok[0]?.t || '';
       }
     }
+    if (final && writer && checkers.length && !ctrl.signal.aborted) final = await verify(prompt, final, writer, checkers, sys, sources, ctrl.signal);
   } catch (e) {
     aiBox(chatEl, ['error']).fail(e);
   }
@@ -359,6 +398,10 @@ $('#mode').addEventListener('click', () => refreshModels());
 $('#effort').addEventListener('click', () => refreshModels());
 input.addEventListener('input', () => refreshModels());
 
+$('#verify').setAttribute('aria-pressed', state.verify);
+$('#verify').addEventListener('click', e => {
+  state.verify = !state.verify; store.set('verify', state.verify); e.currentTarget.setAttribute('aria-pressed', state.verify); refreshModels();
+});
 $('#research').addEventListener('click', e => {
   state.research = !state.research; e.currentTarget.setAttribute('aria-pressed', state.research); refreshModels();
 });
@@ -413,12 +456,26 @@ const MODE_INFO = {
 const company = id => { const k = id.split('/')[0].toLowerCase(); return COMPANIES[k] || k.replace(/(^|[-_])(\w)/g, (_, a, c) => (a ? ' ' : '') + c.toUpperCase()); };
 const nice = m => m.name.replace(/^[^:]+:\s*/, '').replace(/\s*\(free\)\s*$/i, '');
 const ctxText = n => n >= 1e6 ? (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'K' : n || '?';
-const logo = id => { const k = id.split('/')[0].replace(/[^A-Za-z0-9]/g, ''); return `<span class="logo" aria-hidden="true">${esc((k[0] || '?').toUpperCase() + (k[1] || ''))}</span>`; };
+const DOMAINS = {
+  deepseek: 'deepseek.com', qwen: 'qwen.ai', 'meta-llama': 'meta.com', google: 'google.com', mistralai: 'mistral.ai', mistral: 'mistral.ai',
+  microsoft: 'microsoft.com', nvidia: 'nvidia.com', openai: 'openai.com', moonshotai: 'moonshot.ai', 'z-ai': 'z.ai', thudm: 'z.ai',
+  nousresearch: 'nousresearch.com', tngtech: 'tngtech.com', minimax: 'minimax.io', baidu: 'baidu.com', tencent: 'tencent.com',
+  'x-ai': 'x.ai', anthropic: 'anthropic.com', cohere: 'cohere.com', amazon: 'amazon.com', 'ibm-granite': 'ibm.com', 'arcee-ai': 'arcee.ai',
+  liquid: 'liquid.ai', allenai: 'allenai.org', bytedance: 'bytedance.com', openrouter: 'openrouter.ai', meituan: 'meituan.com',
+  'stepfun-ai': 'stepfun.com', inclusionai: 'antgroup.com', cognitivecomputations: 'erichartford.com', rekaai: 'reka.ai', 'shisa-ai': 'shisa.ai'
+};
+const logoLetters = id => { const k = id.split('/')[0].replace(/[^A-Za-z0-9]/g, ''); return esc((k[0] || '?').toUpperCase() + (k[1] || '')); };
+// Company icon from its website; the letters show if it cannot load.
+const logo = id => {
+  const d = DOMAINS[id.split('/')[0].toLowerCase()];
+  return `<span class="logo" aria-hidden="true">${logoLetters(id)}${d ? `<img src="https://www.google.com/s2/favicons?domain=${d}&sz=64" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>`;
+};
 
 function roles() {
   const p = plan(state.busy ? state.prompt : input.value), r = new Map();
   p.answer.forEach((m, i) => r.set(m.id, state.mode === 'auto' ? (i ? 'Backup ' + i : 'Answers') : 'Member ' + (i + 1)));
   if (p.judge) r.set(p.judge.id, r.has(p.judge.id) ? r.get(p.judge.id) + ' + Judge' : 'Judge');
+  p.checkers.slice(0, 2).forEach(m => r.set(m.id, r.has(m.id) ? r.get(m.id) + ' + Checker' : 'Checker'));
   return { p, r };
 }
 
@@ -451,8 +508,8 @@ function refreshModels() {
   else if (state.active.size) line.textContent = 'Working: ' + [...state.active].map(id => nice(state.models.find(m => m.id === id) || { name: id })).join(', ');
   else {
     const p = plan(input.value);
-    line.textContent = state.mode === 'auto' ? (p.answer[0] ? nice(p.answer[0]) + (state.pinned ? ' · pinned' : '') : 'No model')
-      : state.mode === 'compare' ? 'Compare · ' + p.answer.length + ' models' : 'Council · ' + p.answer.length + ' models + judge';
+    line.textContent = state.mode === 'auto' ? (p.answer[0] ? nice(p.answer[0]) + (state.pinned ? ' · pinned' : '') + (p.checkers.length ? ' + 2 checkers' : '') : 'No model')
+      : state.mode === 'compare' ? 'Compare · ' + p.answer.length + ' models' : 'Council · ' + p.answer.length + ' models + judge' + (p.checkers.length ? ' + 2 checkers' : '');
   }
   const panel = $('#models');
   if (panel.hidden) return;
@@ -464,10 +521,10 @@ function refreshModels() {
   }
 
   const { p, r } = roles();
-  const used = [...p.answer, ...(p.judge && !p.answer.includes(p.judge) ? [p.judge] : [])];
+  const used = [...new Set([...p.answer, ...(p.judge ? [p.judge] : []), ...p.checkers.slice(0, 2)])];
   $('#plan').innerHTML = `<div class="pcard">
     <div class="phead"><h3>For your prompt</h3><span class="tag">${state.mode[0].toUpperCase() + state.mode.slice(1)}</span></div>
-    <p class="hint">${MODE_INFO[state.mode]}</p>
+    <p class="hint">${MODE_INFO[state.mode]}${p.checkers.length ? ' Then 2 checkers from other companies double-check the answer, and it is fixed if they find problems.' : state.verify && state.mode === 'compare' ? ' (Verify works in Auto and Council.)' : ''}</p>
     <p class="hint">Detected: <b>${TASK_NAME[p.task]}</b> · thinking <b>${state.effort}</b>${state.research ? ' · <b>research on</b>' : ''}${state.busy ? ' · running now' : input.value.trim() ? '' : ' (type a prompt to see it change)'}</p>
     ${used.map(m => modelRow(m, r.get(m.id))).join('')}
   </div>`;
