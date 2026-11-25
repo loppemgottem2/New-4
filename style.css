@@ -110,3 +110,4 @@ footer { min-width: 0; padding: 6px 12px 10px; display: flex; flex-direction: co
 #chat > * { flex-shrink: 0; }
 .hint a { color: var(--fg); }
 .body a, .sources a, .hint a { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+[hidden] { display: none !important; }
