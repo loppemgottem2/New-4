@@ -336,4 +336,14 @@ for (let i = 0; i < state.history.length; i += 2) {
   const b = aiBox(chatEl, ['history']); b.update(state.history[i + 1]?.content || ''); b.done();
 }
 
+// Open every web link outside the app. Installed web apps on Android can ignore
+// plain target=_blank taps, so open it explicitly and fall back to navigating.
+document.addEventListener('click', e => {
+  const a = e.target.closest('a[href]');
+  if (!a || !/^https?:/i.test(a.getAttribute('href'))) return;
+  e.preventDefault(); e.stopPropagation();
+  const w = window.open(a.href, '_blank', 'noopener');
+  if (!w) location.href = a.href;
+}, true);
+
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
