@@ -1,5 +1,5 @@
 // Caches the app shell so Lion AI opens offline. API calls always go to the network.
-const CACHE = 'lion-v9';
+const CACHE = 'lion-v10';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'icon.svg', 'manifest.webmanifest'];
 
 self.addEventListener('install', e => {

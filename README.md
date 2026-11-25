@@ -8,6 +8,7 @@ A minimalist, mobile-first AI chat app (installable PWA) that runs on free open 
 - **Compare**: three different models answer side by side (swipe between them).
 - **Council**: three models answer, then a reasoning model compares them, fixes errors and writes one final verdict.
 - **Research**: pulls Wikipedia sources and has the model cite them as [n].
+- **Models tab**: tap the title to see which models your prompt will use and how they work together (answer, backups, council members, judge), live status while they run, and every available model grouped by company with its abilities and context size. Tap a model to pin it so Auto always uses it. The current model is always shown under the title.
 - Streaming answers, Markdown and code rendering, stop button, chat memory on device.
 - Fits an Android screen in portrait and landscape without page scrolling; works offline as an app shell.
 

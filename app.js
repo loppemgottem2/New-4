@@ -15,7 +15,10 @@ const state = {
   research: false,
   models: store.get('models', []),
   history: store.get('history', []),   // [{role, content}]
-  busy: null                            // AbortController while generating
+  busy: null,                           // AbortController while generating
+  pinned: store.get('pinned', null),    // model id the user chose to always use in Auto
+  active: new Set(),                    // model ids generating right now
+  open: null                            // model id expanded in the Models tab
 };
 
 /* ---------- settings ---------- */
@@ -42,9 +45,17 @@ async function loadModels() {
     state.models = data
       .filter(m => !freeOnly || (m.pricing && +m.pricing.prompt === 0 && +m.pricing.completion === 0))
       .filter(m => !m.architecture || (m.architecture.output_modalities || ['text']).includes('text'))
-      .map(m => ({ id: m.id, name: m.name || m.id, ctx: m.context_length || 0, reasoning: (m.supported_parameters || []).includes('reasoning') }));
+      .map(m => ({
+        id: m.id, name: m.name || m.id, ctx: m.context_length || 0,
+        reasoning: (m.supported_parameters || []).includes('reasoning'),
+        tools: (m.supported_parameters || []).includes('tools'),
+        free: !m.pricing || (+m.pricing.prompt === 0 && +m.pricing.completion === 0),
+        vision: ((m.architecture || {}).input_modalities || []).includes('image'),
+        desc: (m.description || '').replace(/\s+/g, ' ').slice(0, 280)
+      }));
     store.set('models', state.models);
     status.textContent = state.models.length + ' models ready.';
+    refreshModels();
   } catch (e) {
     status.textContent = 'Could not load models: ' + e.message;
   }
@@ -118,6 +129,12 @@ const EFFORT_SYS = {
 };
 
 async function chat(model, messages, onDelta, signal) {
+  state.active.add(model.id); refreshModels();
+  try { return await chatStream(model, messages, onDelta, signal); }
+  finally { state.active.delete(model.id); refreshModels(); }
+}
+
+async function chatStream(model, messages, onDelta, signal) {
   const body = { model: model.id, messages, stream: true };
   if (model.reasoning) body.reasoning = { effort: state.effort };
   const r = await fetch(baseUrl() + '/chat/completions', { method: 'POST', headers: headers(), body: JSON.stringify(body), signal });
@@ -213,13 +230,28 @@ function aiBox(parent, tags) {
   };
 }
 
+/* ---------- which models a prompt will use ---------- */
+function plan(prompt) {
+  const task = classify(prompt || '');
+  let ranked = rankModels(task, state.effort);
+  const pinned = state.models.find(m => m.id === state.pinned);
+  if (pinned) ranked = [pinned, ...ranked.filter(m => m !== pinned)];
+  if (state.mode === 'auto') return { task, answer: ranked.slice(0, 3), judge: null };
+  return {
+    task,
+    answer: pickDiverse(ranked, 3),
+    judge: state.mode === 'council' ? (rankModels(task, state.effort).find(m => m.reasoning) || ranked[0]) : null
+  };
+}
+
 /* ---------- main flow ---------- */
 async function send(prompt) {
   if (!state.models.length) { openSettings(); $('#modelStatus').textContent = 'Add a key and load models first.'; return; }
   addUser(prompt);
   const ctrl = new AbortController(); state.busy = ctrl; setBusy(true);
-  const task = classify(prompt);
-  const ranked = rankModels(task, state.effort);
+  closeModels();
+  state.prompt = prompt;
+  const { task, answer, judge } = plan(prompt);
 
   let sources = [];
   let sys = 'You are Lion AI, a sharp, honest assistant. Use Markdown. ' + EFFORT_SYS[state.effort];
@@ -234,13 +266,13 @@ async function send(prompt) {
   try {
     if (state.mode === 'auto') {
       // Try the best match; fall back down the ranking if a free model is busy.
-      for (const model of ranked.slice(0, 3)) {
+      for (const model of answer) {
         const box = aiBox(chatEl, [short(model.id), task, state.effort]);
         try { final = await chat(model, messages, box.update, ctrl.signal); box.done(sources); break; }
         catch (e) { box.fail(e); if (e.name === 'AbortError') break; }
       }
     } else {
-      const picks = pickDiverse(ranked, 3);
+      const picks = answer;
       const wrap = document.createElement('div'); wrap.className = 'cards';
       chatEl.append(wrap);
       const answers = await Promise.all(picks.map(async model => {
@@ -251,7 +283,6 @@ async function send(prompt) {
       }));
       const ok = answers.filter(Boolean);
       if (state.mode === 'council' && ok.length && !ctrl.signal.aborted) {
-        const judge = ranked.find(m => m.reasoning) || ranked[0];
         const box = aiBox(chatEl, ['council verdict', short(judge.id)]);
         box.el.classList.add('verdict');
         const brief = ok.map((a, i) => `### Answer ${i + 1} (${short(a.model.id)})\n${a.t}`).join('\n\n');
@@ -272,7 +303,7 @@ async function send(prompt) {
     state.history.push({ role: 'user', content: prompt }, { role: 'assistant', content: final });
     store.set('history', state.history.slice(-40));
   }
-  state.busy = null; setBusy(false);
+  state.busy = null; setBusy(false); refreshModels();
 }
 
 function setBusy(b) { $('#send').classList.toggle('stop', b); $('#send').setAttribute('aria-label', b ? 'Stop' : 'Send'); }
@@ -301,9 +332,12 @@ function seg(id, key) {
   if (saved) { state[key] = saved; $(id).querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === saved)); }
 }
 seg('#mode', 'mode'); seg('#effort', 'effort');
+$('#mode').addEventListener('click', () => refreshModels());
+$('#effort').addEventListener('click', () => refreshModels());
+input.addEventListener('input', () => refreshModels());
 
 $('#research').addEventListener('click', e => {
-  state.research = !state.research; e.currentTarget.setAttribute('aria-pressed', state.research);
+  state.research = !state.research; e.currentTarget.setAttribute('aria-pressed', state.research); refreshModels();
 });
 document.querySelectorAll('.suggest button').forEach(b => b.addEventListener('click', () => { input.value = b.dataset.p; grow(); input.focus(); }));
 
@@ -335,6 +369,109 @@ for (let i = 0; i < state.history.length; i += 2) {
   addUser(state.history[i].content);
   const b = aiBox(chatEl, ['history']); b.update(state.history[i + 1]?.content || ''); b.done();
 }
+
+/* ---------- Models tab ---------- */
+const COMPANIES = {
+  'deepseek': 'DeepSeek', 'qwen': 'Alibaba Qwen', 'meta-llama': 'Meta', 'google': 'Google', 'mistralai': 'Mistral AI',
+  'microsoft': 'Microsoft', 'nvidia': 'NVIDIA', 'openai': 'OpenAI', 'moonshotai': 'Moonshot AI', 'z-ai': 'Zhipu AI',
+  'thudm': 'Zhipu AI', 'nousresearch': 'Nous Research', 'cognitivecomputations': 'Cognitive Computations',
+  'tngtech': 'TNG Technology', 'minimax': 'MiniMax', 'baidu': 'Baidu', 'tencent': 'Tencent', 'x-ai': 'xAI',
+  'anthropic': 'Anthropic', 'cohere': 'Cohere', 'amazon': 'Amazon', 'ibm-granite': 'IBM', 'arcee-ai': 'Arcee AI',
+  'agentica-org': 'Agentica', 'shisa-ai': 'Shisa AI', 'moonshot': 'Moonshot AI', 'liquid': 'Liquid AI',
+  'allenai': 'Allen AI', 'inclusionai': 'inclusionAI', 'meituan': 'Meituan', 'stepfun-ai': 'StepFun',
+  'bytedance': 'ByteDance', 'rekaai': 'Reka', 'openrouter': 'OpenRouter', 'mistral': 'Mistral AI'
+};
+const TASK_NAME = { code: 'coding', math: 'math & logic', research: 'research', creative: 'writing', general: 'general' };
+const MODE_INFO = {
+  auto: 'One model answers. If it is busy, the next one takes over automatically.',
+  compare: 'Three models from different companies answer at the same time, shown side by side.',
+  council: 'Three models answer, then a judge model checks them, fixes mistakes and writes one final answer. Four models work on your prompt together.'
+};
+const company = id => { const k = id.split('/')[0].toLowerCase(); return COMPANIES[k] || k.replace(/(^|[-_])(\w)/g, (_, a, c) => (a ? ' ' : '') + c.toUpperCase()); };
+const nice = m => m.name.replace(/^[^:]+:\s*/, '').replace(/\s*\(free\)\s*$/i, '');
+const ctxText = n => n >= 1e6 ? (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'K' : n || '?';
+const logo = id => { const k = id.split('/')[0].replace(/[^A-Za-z0-9]/g, ''); return `<span class="logo" aria-hidden="true">${esc((k[0] || '?').toUpperCase() + (k[1] || ''))}</span>`; };
+
+function roles() {
+  const p = plan(state.busy ? state.prompt : input.value), r = new Map();
+  p.answer.forEach((m, i) => r.set(m.id, state.mode === 'auto' ? (i ? 'Backup ' + i : 'Answers') : 'Member ' + (i + 1)));
+  if (p.judge) r.set(p.judge.id, r.has(p.judge.id) ? r.get(p.judge.id) + ' + Judge' : 'Judge');
+  return { p, r };
+}
+
+function modelRow(m, role) {
+  const live = state.active.has(m.id), pinned = state.pinned === m.id, open = state.open === m.id;
+  const badges = [m.free !== false ? 'Free' : 'Paid', m.reasoning && 'Reasoning', m.tools && 'Tools', m.vision && 'Vision', ctxText(m.ctx) + ' context']
+    .filter(Boolean).map(b => `<span class="tag">${b}</span>`).join('');
+  const status = live ? '<span class="st live">In use</span>' : pinned ? '<span class="st on">Pinned</span>' : role ? `<span class="st">${esc(role)}</span>` : '';
+  return `<div class="mrow${open ? ' open' : ''}${live ? ' is-live' : ''}" data-id="${esc(m.id)}">
+    <button class="mtop">${logo(m.id)}<span class="mname"><b>${esc(nice(m))}</b><small>${esc(company(m.id))}</small></span>${status}</button>
+    <div class="mmore">
+      <div class="tags">${badges}</div>
+      ${m.desc ? `<p>${esc(m.desc)}${m.desc.length >= 280 ? '…' : ''}</p>` : ''}
+      <code>${esc(m.id)}</code>
+      <button class="pin">${pinned ? 'Stop always using this' : 'Always use this model'}</button>
+    </div>
+  </div>`;
+}
+
+function refreshModels() {
+  // Line under the title: what is (or will be) used.
+  const line = $('#modelLine');
+  if (!state.models.length) line.textContent = 'Tap to see models';
+  else if (state.active.size) line.textContent = 'Working: ' + [...state.active].map(id => nice(state.models.find(m => m.id === id) || { name: id })).join(', ');
+  else {
+    const p = plan(input.value);
+    line.textContent = state.mode === 'auto' ? (p.answer[0] ? nice(p.answer[0]) + (state.pinned ? ' · pinned' : '') : 'No model')
+      : state.mode === 'compare' ? 'Compare · ' + p.answer.length + ' models' : 'Council · ' + p.answer.length + ' models + judge';
+  }
+  const panel = $('#models');
+  if (panel.hidden) return;
+
+  if (!state.models.length) {
+    $('#plan').innerHTML = `<div class="pcard"><h3>No models loaded</h3><p class="hint">Add your free key in Settings, then tap Load models.</p><button class="primary" id="goSettings">Open Settings</button></div>`;
+    $('#mList').innerHTML = ''; $('#mCount').textContent = '';
+    return;
+  }
+
+  const { p, r } = roles();
+  const used = [...p.answer, ...(p.judge && !p.answer.includes(p.judge) ? [p.judge] : [])];
+  $('#plan').innerHTML = `<div class="pcard">
+    <div class="phead"><h3>For your prompt</h3><span class="tag">${state.mode[0].toUpperCase() + state.mode.slice(1)}</span></div>
+    <p class="hint">${MODE_INFO[state.mode]}</p>
+    <p class="hint">Detected: <b>${TASK_NAME[p.task]}</b> · thinking <b>${state.effort}</b>${state.research ? ' · <b>research on</b>' : ''}${state.busy ? ' · running now' : input.value.trim() ? '' : ' (type a prompt to see it change)'}</p>
+    ${used.map(m => modelRow(m, r.get(m.id))).join('')}
+  </div>`;
+
+  const q = $('#mSearch').value.trim().toLowerCase();
+  const list = state.models.filter(m => !q || (m.id + ' ' + m.name + ' ' + company(m.id)).toLowerCase().includes(q));
+  const groups = {};
+  list.forEach(m => (groups[company(m.id)] ||= []).push(m));
+  $('#mCount').textContent = `(${list.length})`;
+  $('#mList').innerHTML = Object.entries(groups).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+    .map(([c, ms]) => `<div class="group"><h4>${esc(c)} <span>${ms.length}</span></h4>${ms.map(m => modelRow(m, r.get(m.id))).join('')}</div>`).join('')
+    || '<p class="hint">No models match.</p>';
+}
+
+function closeModels() { $('#models').hidden = true; $('#modelTab').setAttribute('aria-expanded', 'false'); }
+$('#modelTab').addEventListener('click', () => {
+  const open = $('#models').hidden;
+  $('#models').hidden = !open; $('#modelTab').setAttribute('aria-expanded', String(open));
+  if (open) { refreshModels(); $('#models').scrollTop = 0; }
+});
+$('#mSearch').addEventListener('input', refreshModels);
+$('#models').addEventListener('click', e => {
+  if (e.target.id === 'goSettings') { openSettings(); return; }
+  const row = e.target.closest('.mrow'); if (!row) return;
+  const id = row.dataset.id;
+  if (e.target.closest('.pin')) {
+    state.pinned = state.pinned === id ? null : id; store.set('pinned', state.pinned);
+  } else if (e.target.closest('.mtop')) {
+    state.open = state.open === id ? null : id;
+  } else return;
+  refreshModels();
+});
+refreshModels();
 
 // Open every web link outside the app. Installed web apps on Android can ignore
 // plain target=_blank taps, so open it explicitly and fall back to navigating.
