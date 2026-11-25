@@ -165,8 +165,8 @@ function md(src) {
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\[(\d+)\]/g, '<sup>[$1]</sup>')
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    .replace(/(^|[^"'>=\w])((?:https?:\/\/|www\.)[^\s<]*[^\s<.,;:!?)\]'"*])/g,
-      (_, pre, url) => `${pre}<a href="${url.startsWith('www.') ? 'https://' + url : url}" target="_blank" rel="noopener">${url}</a>`);
+    .replace(/(^|[^"'>=\w\/.@])((?:https?:\/\/|www\.)[^\s<]*[^\s<.,;:!?)\]'"*]|[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|dev|app|co|edu|gov|me|info|tv|gg|xyz|uk|de|fr|jp|ca|au|us)\b(?:\/[^\s<]*[^\s<.,;:!?)\]'"*])?)/gi,
+      (_, pre, url) => `${pre}<a href="${/^https?:/i.test(url) ? url : 'https://' + url}" target="_blank" rel="noopener">${url}</a>`);
   html = html.split(/\n{2,}/).map(p => {
     if (/^\s*([-*]|\d+\.) /m.test(p) && p.split('\n').every(l => /^\s*([-*]|\d+\.) /.test(l) || !l.trim())) {
       const tag = /^\s*\d+\./.test(p) ? 'ol' : 'ul';
