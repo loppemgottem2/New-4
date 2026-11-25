@@ -18,8 +18,13 @@ const state = {
   busy: null,                           // AbortController while generating
   pinned: store.get('pinned', null),    // model id the user chose to always use in Auto
   active: new Set(),                    // model ids generating right now
-  open: null                            // model id expanded in the Models tab
+  open: null,                           // model id expanded in the Models tab
+  health: store.get('health', {}),      // id -> { ok, ms, err, t } from tests and real use
+  testing: null                         // { done, total } while "Test all models" runs
 };
+const HEALTH_TTL = 6 * 3600e3;          // trust a test result for 6 hours
+function health(id) { const h = state.health[id]; return h && Date.now() - h.t < HEALTH_TTL ? h : null; }
+function setHealth(id, ok, extra = {}) { state.health[id] = { ok, t: Date.now(), ...extra }; store.set('health', state.health); }
 
 /* ---------- settings ---------- */
 function baseUrl() {
@@ -95,6 +100,8 @@ function rankModels(task, effort) {
     if (effort === 'medium') s += size >= 14 && size <= 120 ? 4 : 0;
     if (effort === 'high')   s += (m.reasoning ? 8 : 0) + Math.min(size, 700) / 60;
     if (/vision|vl\b|embed|guard|tts|audio/.test(id)) s -= 20;
+    const h = health(m.id);
+    if (h) s += h.ok ? 6 : -100;
     return { m, s };
   }).sort((a, b) => b.s - a.s).map(x => x.m);
 }
@@ -128,9 +135,20 @@ const EFFORT_SYS = {
   high: 'Think step by step, check your reasoning carefully, consider edge cases, then give a complete, well-structured answer.'
 };
 
+function friendly(msg) {
+  if (/provider returned error|upstream|overloaded|unavailable|502|503|timeout/i.test(msg)) return 'This free model is down or overloaded right now.';
+  if (/rate.?limit|429|too many/i.test(msg)) return 'Free limit reached for this model. Wait a minute or try another.';
+  if (/data policy|no endpoints/i.test(msg)) return 'Blocked by your OpenRouter privacy settings: allow free models at openrouter.ai/settings/privacy.';
+  if (/401|unauthor|invalid.*key|no auth/i.test(msg)) return 'Your API key was rejected. Check it in Settings.';
+  if (/402|credits|payment/i.test(msg)) return 'This model needs paid credits.';
+  if (/not a valid model|404|not found/i.test(msg)) return 'This model no longer exists. Reload models in Settings.';
+  return msg;
+}
+
 async function chat(model, messages, onDelta, signal) {
   state.active.add(model.id); refreshModels();
-  try { return await chatStream(model, messages, onDelta, signal); }
+  try { const t = await chatStream(model, messages, onDelta, signal); setHealth(model.id, true); return t; }
+  catch (e) { if (e.name !== 'AbortError') setHealth(model.id, false, { err: friendly(e.message) }); throw e; }
   finally { state.active.delete(model.id); refreshModels(); }
 }
 
@@ -226,7 +244,7 @@ function aiBox(parent, tags) {
         d.append(s);
       }
     },
-    fail(e) { body.classList.remove('cursor'); body.innerHTML = `<span class="err">${esc(e.name === 'AbortError' ? 'Stopped.' : e.message)}</span>`; }
+    fail(e) { body.classList.remove('cursor'); body.innerHTML = `<span class="err">${md(e.name === 'AbortError' ? 'Stopped.' : friendly(e.message))}</span>`; }
   };
 }
 
@@ -236,7 +254,7 @@ function plan(prompt) {
   let ranked = rankModels(task, state.effort);
   const pinned = state.models.find(m => m.id === state.pinned);
   if (pinned) ranked = [pinned, ...ranked.filter(m => m !== pinned)];
-  if (state.mode === 'auto') return { task, answer: ranked.slice(0, 3), judge: null };
+  if (state.mode === 'auto') return { task, answer: ranked.slice(0, 5), judge: null };
   return {
     task,
     answer: pickDiverse(ranked, 3),
@@ -269,7 +287,10 @@ async function send(prompt) {
       for (const model of answer) {
         const box = aiBox(chatEl, [short(model.id), task, state.effort]);
         try { final = await chat(model, messages, box.update, ctrl.signal); box.done(sources); break; }
-        catch (e) { box.fail(e); if (e.name === 'AbortError') break; }
+        catch (e) {
+          if (e.name === 'AbortError' || model === answer[answer.length - 1]) { box.fail(e); break; }
+          box.el.className = 'note'; box.el.textContent = `${nice(model)} was unavailable, switching to the next model…`;
+        }
       }
     } else {
       const picks = answer;
@@ -403,11 +424,14 @@ function modelRow(m, role) {
   const live = state.active.has(m.id), pinned = state.pinned === m.id, open = state.open === m.id;
   const badges = [m.free !== false ? 'Free' : 'Paid', m.reasoning && 'Reasoning', m.tools && 'Tools', m.vision && 'Vision', ctxText(m.ctx) + ' context']
     .filter(Boolean).map(b => `<span class="tag">${b}</span>`).join('');
+  const h = health(m.id);
   const status = live ? '<span class="st live">In use</span>' : pinned ? '<span class="st on">Pinned</span>' : role ? `<span class="st">${esc(role)}</span>` : '';
+  const dot = h ? `<span class="dot ${h.ok ? 'ok' : 'bad'}" title="${h.ok ? 'Works' : 'Not working'}"></span>` : '';
   return `<div class="mrow${open ? ' open' : ''}${live ? ' is-live' : ''}" data-id="${esc(m.id)}">
-    <button class="mtop">${logo(m.id)}<span class="mname"><b>${esc(nice(m))}</b><small>${esc(company(m.id))}</small></span>${status}</button>
+    <button class="mtop">${logo(m.id)}<span class="mname"><b>${dot}${esc(nice(m))}</b><small>${esc(company(m.id))}${h ? (h.ok ? ' · works' + (h.ms ? ' · ' + (h.ms / 1000).toFixed(1) + 's' : '') : ' · not working') : ''}</small></span>${status}</button>
     <div class="mmore">
       <div class="tags">${badges}</div>
+      ${h && !h.ok ? `<p class="err">${esc(h.err || 'Failed last test.')}</p>` : ''}
       ${m.desc ? `<p>${esc(m.desc)}${m.desc.length >= 280 ? '…' : ''}</p>` : ''}
       <code>${esc(m.id)}</code>
       <button class="pin">${pinned ? 'Stop always using this' : 'Always use this model'}</button>
@@ -443,6 +467,14 @@ function refreshModels() {
     ${used.map(m => modelRow(m, r.get(m.id))).join('')}
   </div>`;
 
+  const hs = state.models.map(m => health(m.id)).filter(Boolean);
+  const okN = hs.filter(h => h.ok).length, badN = hs.length - okN;
+  const hasDeepSeek = state.models.some(m => /deepseek/i.test(m.id));
+  $('#mTools').innerHTML = `
+    <button class="primary" id="testAll" ${state.testing ? 'disabled' : ''}>${state.testing ? `Testing ${state.testing.done} of ${state.testing.total}…` : 'Test all models'}</button>
+    <p class="hint">${hs.length ? `<b>${okN} working</b> · ${badN} not working. Lion AI skips broken models automatically.` : 'Checks every model with your key, so Lion AI only uses ones that work.'}</p>
+    ${hasDeepSeek ? '' : '<p class="hint">No free DeepSeek model is offered right now. OpenRouter changes its free list often; reload models in Settings later to check again.</p>'}`;
+
   const q = $('#mSearch').value.trim().toLowerCase();
   const list = state.models.filter(m => !q || (m.id + ' ' + m.name + ' ' + company(m.id)).toLowerCase().includes(q));
   const groups = {};
@@ -451,6 +483,29 @@ function refreshModels() {
   $('#mList').innerHTML = Object.entries(groups).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
     .map(([c, ms]) => `<div class="group"><h4>${esc(c)} <span>${ms.length}</span></h4>${ms.map(m => modelRow(m, r.get(m.id))).join('')}</div>`).join('')
     || '<p class="hint">No models match.</p>';
+}
+
+async function testModel(m) {
+  const t0 = performance.now(), ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const r = await fetch(baseUrl() + '/chat/completions', { method: 'POST', headers: headers(), signal: ctrl.signal,
+      body: JSON.stringify({ model: m.id, messages: [{ role: 'user', content: 'Reply with the word OK.' }], max_tokens: 16 }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) throw new Error(j.error?.metadata?.raw || j.error?.message || 'HTTP ' + r.status);
+    setHealth(m.id, true, { ms: Math.round(performance.now() - t0) });
+  } catch (e) {
+    setHealth(m.id, false, { err: e.name === 'AbortError' ? 'Did not answer within 30 seconds.' : friendly(e.message) });
+  } finally { clearTimeout(timer); }
+}
+
+async function testAll() {
+  if (state.testing) return;
+  const list = [...state.models];
+  state.testing = { done: 0, total: list.length }; refreshModels();
+  // Two at a time keeps us under OpenRouter's free per-minute limit.
+  const next = async () => { for (let m; (m = list.shift());) { await testModel(m); state.testing.done++; refreshModels(); } };
+  await Promise.all([next(), next()]);
+  state.testing = null; refreshModels();
 }
 
 function closeModels() { $('#models').hidden = true; $('#modelTab').setAttribute('aria-expanded', 'false'); }
@@ -462,6 +517,7 @@ $('#modelTab').addEventListener('click', () => {
 $('#mSearch').addEventListener('input', refreshModels);
 $('#models').addEventListener('click', e => {
   if (e.target.id === 'goSettings') { openSettings(); return; }
+  if (e.target.closest('#testAll')) { testAll(); return; }
   const row = e.target.closest('.mrow'); if (!row) return;
   const id = row.dataset.id;
   if (e.target.closest('.pin')) {
