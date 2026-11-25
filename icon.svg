@@ -2,14 +2,11 @@
   <rect width="512" height="512" rx="112" fill="#fff"/>
   <!-- mane -->
   <polygon fill="#000" points="256,30 304,96 376,62 382,140 458,146 424,214 486,256 424,298 458,366 382,372 376,450 304,416 256,482 208,416 136,450 130,372 54,366 88,298 26,256 88,214 54,146 130,140 136,62 208,96"/>
-  <g transform="translate(256 256) scale(1.5) translate(-256 -257)">
-    <!-- face shape -->
-    <path fill="#fff" stroke="#000" stroke-width="14" d="M256 160c-62 0-104 36-104 88 0 30 12 58 30 82 18 24 44 52 74 52s56-28 74-52c18-24 30-52 30-82 0-52-42-88-104-88z"/>
-    <!-- features: enlarged and raised within the face -->
-    <g transform="translate(256 284) scale(1.25) translate(-256 -296)">
-      <path fill="#000" d="M196 236l42 8-8 14c-14 2-28-6-34-22zM316 236l-42 8 8 14c14 2 28-6 34-22z"/>
-      <path fill="#000" d="M226 300h60l-30 30z"/>
-      <path fill="none" stroke="#000" stroke-width="9" stroke-linecap="round" d="M226 346c10 10 22 10 30 0c8 10 20 10 30 0"/>
-    </g>
+  <!-- face, scaled up around the centre -->
+  <g transform="translate(256 262) scale(1.32) translate(-256 -257)">
+    <path fill="#fff" d="M256 166c-62 0-104 34-104 82 0 30 12 58 30 82 18 24 44 52 74 52s56-28 74-52c18-24 30-52 30-82 0-48-42-82-104-82z"/>
+    <path fill="#000" d="M196 236l42 8-8 14c-14 2-28-6-34-22zM316 236l-42 8 8 14c14 2 28-6 34-22z"/>
+    <path fill="#000" d="M226 300h60l-30 30z"/>
+    <path fill="none" stroke="#000" stroke-width="9" stroke-linecap="round" d="M226 346c10 10 22 10 30 0c8 10 20 10 30 0"/>
   </g>
 </svg>
